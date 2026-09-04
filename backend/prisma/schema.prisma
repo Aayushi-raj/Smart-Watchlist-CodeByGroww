@@ -1,0 +1,116 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String?
+  email     String   @unique
+  createdAt DateTime @default(now())
+  
+  watchlists      Watchlist[]
+  userStockStates UserStockState[]
+  goals           Goal[]
+}
+
+model Goal {
+  id           String   @id @default(uuid())
+  userId       String
+  name         String
+  horizonDays  Int
+  targetAmount Float
+  createdAt    DateTime @default(now())
+
+  user         User     @relation(fields: [userId], references: [id])
+}
+
+model Watchlist {
+  id        String   @id @default(uuid())
+  name      String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  
+  stocks    WatchlistStock[]
+}
+
+model Stock {
+  id           String   @id @default(uuid())
+  symbol       String   @unique
+  companyName  String
+  exchange     String
+  sector       String?
+  
+  watchlists   WatchlistStock[]
+  snapshots    MarketSnapshot[]
+  userStates   UserStockState[]
+  changeEvents ChangeEvent[]
+}
+
+model WatchlistStock {
+  watchlistId String
+  stockId     String
+  addedAt     DateTime @default(now())
+  
+  watchlist   Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  stock       Stock     @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@id([watchlistId, stockId])
+}
+
+model MarketSnapshot {
+  id         String   @id @default(uuid())
+  stockId    String
+  price      Float
+  volume     Float
+  timestamp  DateTime @default(now())
+  source     String
+  dataStatus String   // e.g. "LIVE", "DELAYED", "STALE"
+  
+  stock      Stock    @relation(fields: [stockId], references: [id])
+  
+  @@index([stockId, timestamp(sort: Desc)])
+}
+
+model UserStockState {
+  id                    String   @id @default(uuid())
+  userId                String
+  stockId               String
+  lastSeenPrice         Float
+  lastSeenTimestamp     DateTime
+  lastSeenEventVersion  Int      @default(0)
+  
+  user                  User     @relation(fields: [userId], references: [id])
+  stock                 Stock    @relation(fields: [stockId], references: [id])
+  
+  @@unique([userId, stockId])
+}
+
+model ChangeEvent {
+  id          String   @id @default(uuid())
+  stockId     String
+  eventType   String
+  severity    String   // NO_CHANGE, WORTH_KNOWING, ATTENTION
+  score       Int
+  detectedAt  DateTime @default(now())
+  status      String
+  
+  stock       Stock    @relation(fields: [stockId], references: [id])
+  insights    Insight[]
+}
+
+model Insight {
+  id            String   @id @default(uuid())
+  changeEventId String
+  summary       String
+  explanation   String
+  generatedAt   DateTime @default(now())
+  modelVersion  String?
+  
+  changeEvent   ChangeEvent @relation(fields: [changeEventId], references: [id], onDelete: Cascade)
+}
