@@ -6,7 +6,7 @@ A market tracking application designed to help users quickly understand what has
 
 ## 🚀 Overview
 
-Traditional watchlists are static—they show you the current price and a red or green number, leaving the user to figure out if that number is actually important. 
+Traditional watchlists are static they show you the current price and a red or green number, leaving the user to figure out if that number is actually important. 
 
 I built the **Smart Market Watchlist** to flip this paradigm. It acts as an intelligent assistant that watches the market while you are away, filtering out the noise of normal trading activity and highlighting only the anomalies, significant shifts, and contextually relevant changes.
 
@@ -59,20 +59,33 @@ I built the **Smart Market Watchlist** to flip this paradigm. It acts as an inte
 
 ## 🏗️ Architecture
 
-The project follows a decoupled client-server architecture.
+The application follows a **decoupled client-server architecture** with a modular backend.
 
 ```mermaid
-graph TD
-    Client[Next.js React Frontend] -->|REST API| Server[Node/Express Backend]
-    
-    subgraph Backend
-        Server --> API[API Routes]
-        API --> Engine[Change Engine]
-        API --> DB[(SQLite + Prisma)]
-        Engine --> Gemini[Google Gemini AI]
-        Engine --> Yahoo[Yahoo Finance API]
-    end
+flowchart LR
+    Client["Next.js / React Frontend"]
+    API["Node.js / Express API"]
+
+    DB[("SQLite + Prisma")]
+    CE["Meaningful Change Engine"]
+    MF["Market Data"]
+    AI["Gemini AI"]
+    Cache["Cache / Insight Store"]
+
+    Client -->|REST API| API
+
+    API --> DB
+    API --> CE
+
+    CE --> MF
+    CE --> DB
+    CE --> AI
+    CE --> Cache
+
+    MF -->|Validated market data| CE
+    AI -->|Contextual explanation| CE
 ```
+
 ## 📐 Architecture highlights
 - **Centralized Database Instance:** Uses a singleton Prisma client to prevent connection exhaustion during hot-reloads.
 - **Robust Error Handling:** Express 5's native promise rejection handling combined with custom error wrappers ensures the server never crashes on bad API data.
@@ -137,6 +150,7 @@ npm run dev
 <img width="1231" height="576" alt="image" src="https://github.com/user-attachments/assets/42cdc0e2-b6bb-4440-ba86-f0d9bf3bdd8f" />
 <img width="1227" height="589" alt="image" src="https://github.com/user-attachments/assets/2e5fba93-aa51-4294-89db-0d87e312c600" />
 <img width="1301" height="597" alt="image" src="https://github.com/user-attachments/assets/08dc9a8b-f3c6-4816-9ef8-5e9b37739884" />
+<img width="1275" height="600" alt="image" src="https://github.com/user-attachments/assets/c40696c8-5183-4cc1-a454-9b4c0467bb57" />
 
 
 
