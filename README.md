@@ -74,7 +74,7 @@ The application follows a **decoupled client-server architecture** with a modula
 ### Backend
 - **Runtime:** Node.js + Express 5
 - **Language:** TypeScript
-- **Database:** SQLite (via Prisma ORM) for localized, fast data persistence
+- **Database:** PostgreSQL (via Prisma ORM) for scalable data persistence
 - **External APIs:** Yahoo Finance (via `yahoo-finance2` for live market data)
 - **AI Integration:** Google GenAI SDK (Gemini 1.5)
 
