@@ -60,36 +60,7 @@ I built the **Smart Market Watchlist** to flip this paradigm. It acts as an inte
 ## 🏗️ Architecture
 
 The application follows a **decoupled client-server architecture** with a modular backend.
-
-```mermaid
-flowchart LR
-    Client["Next.js / React Frontend"]
-    API["Node.js / Express API"]
-
-    DB[("SQLite + Prisma")]
-    CE["Meaningful Change Engine"]
-    MF["Market Data"]
-    AI["Gemini AI"]
-    Cache["Cache / Insight Store"]
-
-    Client -->|REST API| API
-
-    API --> DB
-    API --> CE
-
-    CE --> MF
-    CE --> DB
-    CE --> AI
-    CE --> Cache
-
-    MF -->|Validated market data| CE
-    AI -->|Contextual explanation| CE
-```
-
-## 📐 Architecture highlights
-- **Centralized Database Instance:** Uses a singleton Prisma client to prevent connection exhaustion during hot-reloads.
-- **Robust Error Handling:** Express 5's native promise rejection handling combined with custom error wrappers ensures the server never crashes on bad API data.
-- **Stateless Scoring Engine:** The `changeEngine.ts` computes "Meaningful Change Scores" deterministically on the fly, ensuring fast response times without database bloat.
+<img width="6889" height="3433" alt="image" src="https://github.com/user-attachments/assets/db2d6f0f-c1d1-4e12-9ae3-1b7548d37879" />
 
   
 ## 🛠️ Tech Stack
