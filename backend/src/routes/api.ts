@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import prisma from '../db';
 import yahooFinance from '../lib/yahooFinance';
 import { getNSEMarketStatus } from '../lib/marketHours';
-import { computeMeaningfulChange } from '../services/changeEngine';
+import { computeMeaningfulChange, Sensitivity } from '../services/changeEngine';
 import { ingestLiveMarketData, pruneOldSnapshots } from '../services/marketData';
 import { getUserGoalImpacts } from '../services/goalEngine';
 import { generateInsightForEvent } from '../services/insightEngine';
@@ -292,9 +292,10 @@ router.delete('/users/:userId/watchlist/stocks/:stockId', async (req: Request, r
 
 router.get('/users/:userId/dashboard/changes', async (req: Request, res: Response) => {
   const userId = p(req.params.userId);
+  const sensitivity = (req.query.sensitivity as Sensitivity) || 'WATCHFUL';
 
   try {
-    const changes = await computeMeaningfulChange(userId);
+    const changes = await computeMeaningfulChange(userId, sensitivity);
     const marketStatus = getNSEMarketStatus();
 
     const attention    = changes.filter(c => c.severity === 'ATTENTION' || c.severity === 'SIGNIFICANT_CHANGE');
@@ -395,6 +396,120 @@ router.get('/users/:userId/goals/impact', async (req: Request, res: Response) =>
   const userId = p(req.params.userId);
   const impacts = await getUserGoalImpacts(userId);
   res.json(impacts);
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CHANGE HISTORY — per-stock event timeline
+// ──────────────────────────────────────────────────────────────────────────────
+
+router.get('/users/:userId/stocks/:stockId/history', async (req: Request, res: Response) => {
+  const stockId = p(req.params.stockId);
+
+  try {
+    const events = await prisma.changeEvent.findMany({
+      where: { stockId },
+      orderBy: { detectedAt: 'desc' },
+      take: 10,
+      include: {
+        stock: { select: { symbol: true, companyName: true } },
+        insights: { select: { summary: true, modelVersion: true } },
+      },
+    });
+
+    res.json(events);
+  } catch (error) {
+    console.error('[API] Failed to fetch stock history:', error);
+    res.status(500).json({ error: 'Failed to fetch history' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTOR CORRELATION — other stocks in same sector from user's watchlist
+// ──────────────────────────────────────────────────────────────────────────────
+
+router.get('/users/:userId/sector-context', async (req: Request, res: Response) => {
+  const userId  = p(req.params.userId);
+  const stockId = req.query.stockId as string;
+
+  if (!stockId) return res.status(400).json({ error: 'stockId query param required' });
+
+  try {
+    // Get the target stock's sector
+    const targetStock = await prisma.stock.findUnique({ where: { id: stockId } });
+    if (!targetStock) return res.status(404).json({ error: 'Stock not found' });
+
+    if (!targetStock.sector || targetStock.sector === 'Unknown') {
+      return res.json({ sector: null, peers: [] });
+    }
+
+    // Find all other stocks in the same sector within this user's watchlists
+    const watchlist = await prisma.watchlist.findFirst({ where: { userId } });
+    if (!watchlist) return res.json({ sector: targetStock.sector, peers: [] });
+
+    const peerEntries = await prisma.watchlistStock.findMany({
+      where: {
+        watchlistId: watchlist.id,
+        stock: { sector: targetStock.sector },
+        stockId: { not: stockId }, // exclude the stock itself
+      },
+      include: {
+        stock: {
+          include: {
+            snapshots: {
+              orderBy: { timestamp: 'desc' },
+              take: 2,
+            },
+          },
+        },
+      },
+    });
+
+    const peers = peerEntries.map(pe => {
+      const snaps   = pe.stock.snapshots;
+      const latest  = snaps[0];
+      const prev    = snaps[1];
+      const dayChangePct = latest && prev && prev.price > 0
+        ? ((latest.price - prev.price) / prev.price) * 100
+        : 0;
+      return {
+        id:          pe.stock.id,
+        symbol:      pe.stock.symbol,
+        companyName: pe.stock.companyName,
+        price:       latest?.price ?? 0,
+        dayChangePct,
+        dataStatus:  latest?.dataStatus ?? 'STALE',
+      };
+    });
+
+    // Determine if this is sector-wide or company-specific
+    const movingDown  = peers.filter(p => p.dayChangePct < -0.5).length;
+    const movingUp    = peers.filter(p => p.dayChangePct > 0.5).length;
+    const isSectorWide = peers.length > 0 &&
+      (movingDown >= Math.ceil(peers.length * 0.6) ||
+       movingUp   >= Math.ceil(peers.length * 0.6));
+
+    res.json({
+      sector: targetStock.sector,
+      peers,
+      isSectorWide,
+      sectorSignal: isSectorWide
+        ? (movingDown > movingUp ? 'SECTOR_WIDE_DECLINE' : 'SECTOR_WIDE_RALLY')
+        : 'COMPANY_SPECIFIC',
+    });
+  } catch (error) {
+    console.error('[API] Failed to fetch sector context:', error);
+    res.status(500).json({ error: 'Failed to fetch sector context' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// USER SETTINGS  (stored client-side via this lightweight endpoint for logging)
+// ──────────────────────────────────────────────────────────────────────────────
+
+router.get('/users/:userId/settings', async (req: Request, res: Response) => {
+  // Settings are managed on the client (localStorage) for hackathon simplicity.
+  // This endpoint exists as a stub for future server-side persistence.
+  res.json({ sensitivity: 'WATCHFUL' });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -3,7 +3,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Search, Plus, Edit2, AlertCircle, Info, CheckCircle2,
-  ArrowRight, X, TrendingUp, TrendingDown, RefreshCw, Wifi, WifiOff, Clock
+  ArrowRight, X, TrendingUp, TrendingDown, RefreshCw, Wifi, WifiOff, Clock,
+  Settings, History, BarChart2, ChevronDown, Check
 } from 'lucide-react';
 import {
   getDashboardChanges,
@@ -13,10 +14,17 @@ import {
   addStockToWatchlist,
   deleteStockFromWatchlist,
   triggerMarketTick,
+  getChangeHistory,
+  getSectorContext,
+  getLiveQuotePreview,
   DashboardChanges,
   LiveStock,
   StockChange,
   GoalImpact,
+  Sensitivity,
+  ChangeHistoryEvent,
+  SectorContext,
+  LiveQuotePreview
 } from '@/services/api';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -93,6 +101,210 @@ function MiniSparkline({ isUp }: { isUp: boolean }) {
   );
 }
 
+// ── New Feature Components ──────────────────────────────────────────────────
+
+function ReturnDigestOverlay({
+  changes,
+  lastSeenTimestamp,
+  onClose
+}: {
+  changes: StockChange[];
+  lastSeenTimestamp: string;
+  onClose: () => void;
+}) {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    // slight delay for animation
+    const t = setTimeout(() => setVisible(true), 100);
+    return () => clearTimeout(t);
+  }, []);
+
+  const attention = changes.filter(c => c.severity === 'ATTENTION' || c.severity === 'SIGNIFICANT_CHANGE');
+  const biggestMover = changes.reduce((prev, current) =>
+    Math.abs(current.percentageChange) > Math.abs(prev.percentageChange) ? current : prev
+  , changes[0]);
+
+  return (
+    <div className={`fixed inset-0 z-[100] flex items-center justify-center bg-[#44475b]/80 backdrop-blur-sm transition-opacity duration-700 ${visible ? 'opacity-100' : 'opacity-0'}`}>
+      <div className={`bg-white rounded-2xl p-10 max-w-[600px] w-full shadow-2xl transform transition-all duration-700 ${visible ? 'translate-y-0 scale-100' : 'translate-y-10 scale-95'}`}>
+        <div className="flex flex-col items-center text-center gap-6">
+          <div className="w-16 h-16 bg-[#e6f9f4] rounded-full flex items-center justify-center">
+            <Clock className="w-8 h-8 text-[#00d09c]" />
+          </div>
+          <div>
+            <h2 className="text-[32px] font-bold text-[#44475b] tracking-tight mb-2">
+              You were away for {formatTimeAgo(lastSeenTimestamp).replace(' ago', '')}
+            </h2>
+            <p className="text-[18px] text-[#7c7e8c]">
+              Here's the digest of what happened in the market while you were gone.
+            </p>
+          </div>
+
+          <div className="w-full grid grid-cols-2 gap-4 mt-4">
+            <div className="bg-gray-50 rounded-xl p-5 border border-gray-100 text-left">
+              <div className="text-[13px] font-bold text-[#7c7e8c] uppercase tracking-wider mb-2">Total Changes</div>
+              <div className="text-[28px] font-bold text-[#44475b]">
+                {changes.length} <span className="text-[15px] font-medium text-[#7c7e8c] ml-1">stocks moved</span>
+              </div>
+              <div className="text-[13px] font-medium text-[#eb5b3c] mt-1 flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5" /> {attention.length} need attention
+              </div>
+            </div>
+
+            <div className="bg-gray-50 rounded-xl p-5 border border-gray-100 text-left">
+              <div className="text-[13px] font-bold text-[#7c7e8c] uppercase tracking-wider mb-2">Biggest Mover</div>
+              {biggestMover ? (
+                <>
+                  <div className="text-[24px] font-bold text-[#44475b]">{biggestMover.stock.symbol}</div>
+                  <div className={`text-[15px] font-bold mt-1 flex items-center gap-1 ${biggestMover.percentageChange < 0 ? 'text-[#eb5b3c]' : 'text-[#00d09c]'}`}>
+                    {biggestMover.percentageChange < 0 ? <TrendingDown className="w-4 h-4" /> : <TrendingUp className="w-4 h-4" />}
+                    {biggestMover.percentageChange > 0 ? '+' : ''}{biggestMover.percentageChange.toFixed(2)}%
+                  </div>
+                </>
+              ) : (
+                <div className="text-[15px] font-medium text-[#7c7e8c]">None</div>
+              )}
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              setVisible(false);
+              setTimeout(onClose, 500); // Wait for fade out
+            }}
+            className="mt-6 px-10 py-4 bg-[#00d09c] text-white rounded-xl font-bold text-[16px] hover:bg-[#00b386] transition-colors shadow-lg shadow-[#00d09c]/30 flex items-center gap-2"
+          >
+            Go to Watchlist <ArrowRight className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SensitivityDropdown({ sensitivity, onChange }: { sensitivity: Sensitivity, onChange: (s: Sensitivity) => void }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const options: { value: Sensitivity; label: string; desc: string }[] = [
+    { value: 'CALM', label: 'Calm', desc: 'Alerts on >5% moves' },
+    { value: 'WATCHFUL', label: 'Watchful', desc: 'Alerts on >3% moves' },
+    { value: 'VIGILANT', label: 'Vigilant', desc: 'Alerts on >0.5% moves' }
+  ];
+
+  const current = options.find(o => o.value === sensitivity);
+
+  return (
+    <div className="relative z-20">
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-2 px-3 py-2 border border-gray-200 rounded-lg text-[13px] font-medium text-[#44475b] hover:bg-gray-50 transition-colors"
+      >
+        <Settings className="w-4 h-4 text-gray-400" />
+        {current?.label} Mode
+        <ChevronDown className="w-4 h-4 text-gray-400 ml-1" />
+      </button>
+      {isOpen && (
+        <div className="absolute top-full right-0 mt-2 w-64 bg-white border border-gray-100 rounded-xl shadow-[0_10px_40px_rgba(0,0,0,0.12)] p-2">
+          <div className="px-2 pt-2 pb-1 text-[11px] font-bold text-[#7c7e8c] uppercase tracking-wider">Alert Sensitivity</div>
+          {options.map(opt => (
+            <button
+              key={opt.value}
+              onClick={() => { onChange(opt.value); setIsOpen(false); }}
+              className="w-full text-left px-3 py-2 hover:bg-gray-50 rounded-lg flex items-center justify-between"
+            >
+              <div>
+                <div className="text-[13px] font-medium text-[#44475b]">{opt.label}</div>
+                <div className="text-[11px] text-[#7c7e8c]">{opt.desc}</div>
+              </div>
+              {opt.value === sensitivity && <Check className="w-4 h-4 text-[#00d09c]" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SectorContextCard({ context }: { context: SectorContext }) {
+  if (!context || !context.sector || context.peers.length === 0) return null;
+
+  return (
+    <section className="border-t border-gray-100 pt-6">
+      <h3 className="text-[12px] font-bold text-[#7c7e8c] uppercase tracking-wider mb-3 flex items-center gap-2">
+        📊 Sector Context <span className="text-[11px] font-medium opacity-70">({context.sector})</span>
+      </h3>
+      <div className={`p-4 rounded-xl border ${
+        context.sectorSignal === 'SECTOR_WIDE_DECLINE' ? 'bg-red-50 border-red-100' :
+        context.sectorSignal === 'SECTOR_WIDE_RALLY' ? 'bg-[#e6f9f4] border-[#00d09c]/20' :
+        'bg-gray-50 border-gray-100'
+      }`}>
+        <div className="flex items-start gap-3 mb-3">
+          <div className="mt-0.5">
+            {context.sectorSignal === 'COMPANY_SPECIFIC' && <Info className="w-5 h-5 text-blue-500" />}
+            {context.sectorSignal === 'SECTOR_WIDE_DECLINE' && <TrendingDown className="w-5 h-5 text-[#eb5b3c]" />}
+            {context.sectorSignal === 'SECTOR_WIDE_RALLY' && <TrendingUp className="w-5 h-5 text-[#00d09c]" />}
+          </div>
+          <div>
+            <div className="text-[13px] font-bold text-[#44475b]">
+              {context.sectorSignal === 'COMPANY_SPECIFIC' && 'Company-Specific Move'}
+              {context.sectorSignal === 'SECTOR_WIDE_DECLINE' && 'Sector-Wide Decline'}
+              {context.sectorSignal === 'SECTOR_WIDE_RALLY' && 'Sector-Wide Rally'}
+            </div>
+            <div className="text-[12px] text-[#44475b] mt-1">
+              {context.sectorSignal === 'COMPANY_SPECIFIC' && `Other ${context.sector} stocks in your watchlist are not showing the same trend.`}
+              {context.sectorSignal === 'SECTOR_WIDE_DECLINE' && `Other ${context.sector} stocks in your watchlist are also down.`}
+              {context.sectorSignal === 'SECTOR_WIDE_RALLY' && `Other ${context.sector} stocks in your watchlist are also up.`}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 bg-white/60 rounded-lg p-2.5">
+          {context.peers.map(p => (
+            <div key={p.id} className="flex justify-between items-center text-[12px]">
+              <span className="font-medium text-[#44475b]">{p.symbol}</span>
+              <span className={`font-medium ${p.dayChangePct < 0 ? 'text-[#eb5b3c]' : p.dayChangePct > 0 ? 'text-[#00d09c]' : 'text-[#7c7e8c]'}`}>
+                {p.dayChangePct > 0 ? '+' : ''}{p.dayChangePct.toFixed(2)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ChangeHistoryList({ history }: { history: ChangeHistoryEvent[] }) {
+  if (!history || history.length === 0) return null;
+
+  return (
+    <section className="border-t border-gray-100 pt-6">
+      <h3 className="text-[12px] font-bold text-[#7c7e8c] uppercase tracking-wider mb-3 flex items-center gap-2">
+        <History className="w-4 h-4" /> Change History
+      </h3>
+      <div className="relative pl-3 border-l-2 border-gray-100 flex flex-col gap-4 ml-1">
+        {history.map((evt, i) => (
+          <div key={evt.id} className="relative">
+            <div className={`absolute -left-[17px] top-1 w-2.5 h-2.5 rounded-full border-2 border-white ${
+              evt.severity === 'SIGNIFICANT_CHANGE' ? 'bg-[#eb5b3c]' :
+              evt.severity === 'ATTENTION' ? 'bg-[#eb5b3c]' : 'bg-[#eab308]'
+            }`} />
+            <div className="text-[10px] font-bold text-[#7c7e8c] uppercase tracking-wider mb-0.5">
+              {formatTimeAgo(evt.detectedAt)}
+            </div>
+            <div className="text-[13px] text-[#44475b]">
+              <span className="font-medium">Score {evt.score}</span> — {evt.severity.replace('_', ' ')}
+            </div>
+            {evt.insights?.[0]?.summary && (
+              <div className="text-[12px] text-[#7c7e8c] mt-1 bg-gray-50 p-2 rounded">
+                {evt.insights[0].summary}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function WatchlistPage() {
@@ -100,6 +312,14 @@ export default function WatchlistPage() {
   const [goalImpacts, setGoalImpacts]       = useState<GoalImpact[]>([]);
   const [liveWatchlist, setLiveWatchlist]   = useState<LiveStock[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
+  
+  // New State
+  const [sensitivity, setSensitivity]       = useState<Sensitivity>('WATCHFUL');
+  const [sectorContext, setSectorContext]   = useState<SectorContext | null>(null);
+  const [changeHistory, setChangeHistory]   = useState<ChangeHistoryEvent[]>([]);
+  const [showDigest, setShowDigest]         = useState(false);
+  const [hasShownDigest, setHasShownDigest] = useState(false);
+  const [livePreview, setLivePreview]       = useState<LiveQuotePreview | null>(null);
   const [searchQuery, setSearchQuery]       = useState('');
   const [isEditing, setIsEditing]           = useState(false);
   const [isAddingStock, setIsAddingStock]   = useState(false);
@@ -125,7 +345,7 @@ export default function WatchlistPage() {
     try {
       await createDemoGoal().catch(() => {});
       const [changes, impacts, wl] = await Promise.all([
-        getDashboardChanges(),
+        getDashboardChanges(sensitivity),
         getGoalImpacts(),
         getLiveWatchlist(),
       ]);
@@ -133,15 +353,55 @@ export default function WatchlistPage() {
       setGoalImpacts(impacts);
       setLiveWatchlist(wl);
       setLastLoadedAt(new Date());
+
+      // Show digest if we have attention items and >1 hour since last visit
+      const allC = [...changes.attention, ...changes.worthKnowing];
+      if (allC.length > 0 && !hasShownDigest) {
+        const earliest = allC.reduce((e, c) => c.lastSeenTimestamp < e ? c.lastSeenTimestamp : e, allC[0].lastSeenTimestamp);
+        const hoursDiff = (Date.now() - new Date(earliest).getTime()) / 3_600_000;
+        
+        // Use local storage to only show digest once per session
+        const lastDigestStr = localStorage.getItem('lastDigestShown');
+        const shouldShow = !lastDigestStr || (Date.now() - parseInt(lastDigestStr)) > 3_600_000;
+
+        if (hoursDiff > 1 && shouldShow) {
+          setShowDigest(true);
+          setHasShownDigest(true);
+          localStorage.setItem('lastDigestShown', Date.now().toString());
+        }
+      }
     } catch (err: any) {
       console.error('Failed to load dashboard:', err);
       setLoadError('Could not connect to server. Make sure the backend is running on port 5000.');
     } finally {
       setIsRefreshing(false);
     }
-  }, []);
+  }, [sensitivity, hasShownDigest]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  // Load Sector Context & History when stock is selected
+  useEffect(() => {
+    if (selectedStockId) {
+      setSectorContext(null);
+      setChangeHistory([]);
+      getSectorContext(selectedStockId).then(setSectorContext).catch(console.error);
+      getChangeHistory(selectedStockId).then(setChangeHistory).catch(console.error);
+    }
+  }, [selectedStockId]);
+
+  // Sensitivity persistence
+  useEffect(() => {
+    const saved = localStorage.getItem('sensitivity') as Sensitivity;
+    if (saved && (saved === 'CALM' || saved === 'WATCHFUL' || saved === 'VIGILANT')) {
+      setSensitivity(saved);
+    }
+  }, []);
+
+  const handleSensitivityChange = (s: Sensitivity) => {
+    setSensitivity(s);
+    localStorage.setItem('sensitivity', s);
+  };
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -154,6 +414,27 @@ export default function WatchlistPage() {
     setIsRefreshing(false);
   };
 
+  const handleAddSymbolChange = (val: string) => {
+    setAddSymbolInput(val);
+    setLivePreview(null);
+    setAddError('');
+  };
+
+  // Debounced Live Preview
+  useEffect(() => {
+    const sym = addSymbolInput.trim().toUpperCase();
+    if (!sym || sym.length < 2) return;
+    const t = setTimeout(async () => {
+      try {
+        const preview = await getLiveQuotePreview(sym);
+        setLivePreview(preview);
+      } catch {
+        setLivePreview(null);
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [addSymbolInput]);
+
   const handleAddStock = async () => {
     const sym = addSymbolInput.trim().toUpperCase();
     if (!sym) return;
@@ -162,6 +443,7 @@ export default function WatchlistPage() {
     try {
       await addStockToWatchlist(sym);
       setAddSymbolInput('');
+      setLivePreview(null);
       setIsAddingStock(false);
       await loadAll();
     } catch (e: any) {
@@ -223,6 +505,13 @@ export default function WatchlistPage() {
 
   return (
     <div className="w-full max-w-[1200px] mx-auto px-6 py-8 pb-24 flex gap-8 items-start relative">
+      {showDigest && lastSeenTimestamp && (
+        <ReturnDigestOverlay 
+          changes={allChanges} 
+          lastSeenTimestamp={lastSeenTimestamp} 
+          onClose={() => setShowDigest(false)} 
+        />
+      )}
 
       <div className="flex-1 flex flex-col gap-8">
 
@@ -245,14 +534,17 @@ export default function WatchlistPage() {
               )}
             </div>
 
-            <button
-              onClick={handleRefresh}
-              disabled={isRefreshing}
-              className="flex items-center gap-2 px-3 py-2 border border-gray-200 rounded-lg text-[13px] font-medium text-[#44475b] hover:bg-gray-50 transition-colors disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-              {isRefreshing ? 'Refreshing…' : 'Refresh'}
-            </button>
+            <div className="flex items-center gap-3">
+              <SensitivityDropdown sensitivity={sensitivity} onChange={handleSensitivityChange} />
+              <button
+                onClick={handleRefresh}
+                disabled={isRefreshing}
+                className="flex items-center gap-2 px-3 py-2 border border-gray-200 rounded-lg text-[13px] font-medium text-[#44475b] hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                {isRefreshing ? 'Refreshing…' : 'Refresh'}
+              </button>
+            </div>
           </div>
 
           {/* Last checked + Market status */}
@@ -433,19 +725,37 @@ export default function WatchlistPage() {
                         type="text"
                         placeholder="e.g. RELIANCE, TCS"
                         value={addSymbolInput}
-                        onChange={e => setAddSymbolInput(e.target.value.toUpperCase())}
-                        onKeyDown={e => { if (e.key === 'Enter') handleAddStock(); }}
+                        onChange={e => handleAddSymbolChange(e.target.value.toUpperCase())}
+                        onKeyDown={e => { if (e.key === 'Enter' && livePreview) handleAddStock(); }}
                         className="flex-1 border border-gray-200 rounded-md px-3 py-1.5 text-sm outline-none focus:border-[#00d09c] transition-colors"
                         autoFocus
                       />
                       <button
                         onClick={handleAddStock}
-                        disabled={addingInProgress || !addSymbolInput.trim()}
+                        disabled={addingInProgress || !addSymbolInput.trim() || !livePreview}
                         className="px-3 py-1.5 bg-[#00d09c] text-white text-sm font-medium rounded-md hover:bg-[#00b386] transition-colors disabled:opacity-50"
                       >
                         {addingInProgress ? '…' : 'Add'}
                       </button>
                     </div>
+                    
+                    {/* Live Preview Card */}
+                    {livePreview && (
+                      <div className="mt-3 bg-gray-50 border border-gray-100 rounded-lg p-3">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <div className="text-[13px] font-bold text-[#44475b]">{livePreview.symbol}</div>
+                            <div className="text-[11px] text-[#7c7e8c]">{livePreview.companyName}</div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-[13px] font-bold text-[#44475b]">₹{livePreview.price.toFixed(2)}</div>
+                            <div className={`text-[11px] font-medium ${livePreview.dayChange < 0 ? 'text-[#eb5b3c]' : 'text-[#00d09c]'}`}>
+                              {livePreview.dayChange > 0 ? '+' : ''}{livePreview.dayChangePercent.toFixed(2)}%
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     {addError && (
                       <p className="text-[11px] text-[#eb5b3c] mt-2">{addError}</p>
                     )}
@@ -753,6 +1063,10 @@ export default function WatchlistPage() {
                   )}
                 </div>
               )}
+
+              {/* Added: Sector Context and Change History (Show for both changes and normal stocks) */}
+              {sectorContext && <SectorContextCard context={sectorContext} />}
+              {changeHistory && changeHistory.length > 0 && <ChangeHistoryList history={changeHistory} />}
             </div>
 
             {/* Panel footer — set alert instead of mocked BUY/SELL */}

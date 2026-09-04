@@ -2,6 +2,9 @@ const API_BASE = 'http://localhost:5000/api';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+export type Sensitivity = 'CALM' | 'WATCHFUL' | 'VIGILANT';
+
+
 export interface LiveStock {
   id: string;
   symbol: string;
@@ -93,6 +96,50 @@ export interface GoalImpact {
   totalRiskScore: number;
 }
 
+export interface ChangeHistoryEvent {
+  id: string;
+  stockId: string;
+  eventType: string;
+  severity: string;
+  score: number;
+  detectedAt: string;
+  status: string;
+  stock: {
+    symbol: string;
+    companyName: string;
+  };
+  insights: {
+    summary: string;
+    modelVersion: string | null;
+  }[];
+}
+
+export interface SectorPeer {
+  id: string;
+  symbol: string;
+  companyName: string;
+  price: number;
+  dayChangePct: number;
+  dataStatus: string;
+}
+
+export interface SectorContext {
+  sector: string | null;
+  peers: SectorPeer[];
+  isSectorWide: boolean;
+  sectorSignal: 'SECTOR_WIDE_DECLINE' | 'SECTOR_WIDE_RALLY' | 'COMPANY_SPECIFIC';
+}
+
+export interface LiveQuotePreview {
+  symbol: string;
+  companyName: string;
+  price: number;
+  volume: number;
+  dayChange: number;
+  dayChangePercent: number;
+}
+
+
 // ── Session Management ───────────────────────────────────────────────────────
 
 let _userId: string | null = null;
@@ -123,9 +170,9 @@ async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export async function getDashboardChanges(): Promise<DashboardChanges> {
+export async function getDashboardChanges(sensitivity: Sensitivity = 'WATCHFUL'): Promise<DashboardChanges> {
   const userId = await getDemoUser();
-  return apiFetch<DashboardChanges>(`${API_BASE}/users/${userId}/dashboard/changes`);
+  return apiFetch<DashboardChanges>(`${API_BASE}/users/${userId}/dashboard/changes?sensitivity=${sensitivity}`);
 }
 
 export async function getLiveWatchlist(): Promise<LiveStock[]> {
@@ -183,3 +230,18 @@ export async function getMarketStatus() {
     `${API_BASE}/market/status`
   );
 }
+
+export async function getChangeHistory(stockId: string): Promise<ChangeHistoryEvent[]> {
+  const userId = await getDemoUser();
+  return apiFetch<ChangeHistoryEvent[]>(`${API_BASE}/users/${userId}/stocks/${stockId}/history`);
+}
+
+export async function getSectorContext(stockId: string): Promise<SectorContext> {
+  const userId = await getDemoUser();
+  return apiFetch<SectorContext>(`${API_BASE}/users/${userId}/sector-context?stockId=${stockId}`);
+}
+
+export async function getLiveQuotePreview(symbol: string): Promise<LiveQuotePreview> {
+  return apiFetch<LiveQuotePreview>(`${API_BASE}/stocks/${symbol}/live`);
+}
+
