@@ -1,4 +1,4 @@
-# Smart Market Watchlist - Groww CODE 2026
+# WatchWise - Smart Market Watchlist - Groww CODE 2026
 
 ![Smart Market Watchlist](https://img.shields.io/badge/Groww-CODE_2026-00d09c?style=for-the-badge)
 
@@ -8,7 +8,7 @@ A market tracking application designed to help users quickly understand what has
 
 Traditional watchlists are static they show you the current price and a red or green number, leaving the user to figure out if that number is actually important. 
 
-I built the **Smart Market Watchlist** to flip this paradigm. It acts as an intelligent assistant that watches the market while you are away, filtering out the noise of normal trading activity and highlighting only the anomalies, significant shifts, and contextually relevant changes.
+I built the **WatchWise-Smart Market Watchlist** to flip this paradigm. It acts as an intelligent assistant that watches the market while you are away, filtering out the noise of normal trading activity and highlighting only the anomalies, significant shifts, and contextually relevant changes.
 
 ## ✨ Core Features & Implementation
 
