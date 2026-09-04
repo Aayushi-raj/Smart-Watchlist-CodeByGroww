@@ -2,8 +2,6 @@
 
 ![Smart Market Watchlist](https://img.shields.io/badge/Groww-CODE_2026-00d09c?style=for-the-badge)
 
-# Smart Market Watchlist
-
 A market tracking application designed to help users quickly understand what has "meaningfully changed" since they last checked, ensuring their attention is directed exactly where it matters most.
 
 ## 🚀 Overview
@@ -75,7 +73,12 @@ graph TD
         Engine --> Yahoo[Yahoo Finance API]
     end
 ```
+## 📐 Architecture highlights
+- **Centralized Database Instance:** Uses a singleton Prisma client to prevent connection exhaustion during hot-reloads.
+- **Robust Error Handling:** Express 5's native promise rejection handling combined with custom error wrappers ensures the server never crashes on bad API data.
+- **Stateless Scoring Engine:** The `changeEngine.ts` computes "Meaningful Change Scores" deterministically on the fly, ensuring fast response times without database bloat.
 
+  
 ## 🛠️ Tech Stack
 
 ### Frontend
@@ -129,10 +132,6 @@ npm install
 npm run dev
 ```
 
-## 📐 Architecture highlights
-- **Centralized Database Instance:** Uses a singleton Prisma client to prevent connection exhaustion during hot-reloads.
-- **Robust Error Handling:** Express 5's native promise rejection handling combined with custom error wrappers ensures the server never crashes on bad API data.
-- **Stateless Scoring Engine:** The `changeEngine.ts` computes "Meaningful Change Scores" deterministically on the fly, ensuring fast response times without database bloat.
 
 ---
 *Built with ❤️ for Groww CODE 2026*
