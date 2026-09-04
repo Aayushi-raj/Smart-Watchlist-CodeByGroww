@@ -1,208 +1,235 @@
-import { Router } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { Router, Request, Response } from 'express';
+import prisma from '../db';
+import yahooFinance from '../lib/yahooFinance';
+import { getNSEMarketStatus } from '../lib/marketHours';
 import { computeMeaningfulChange } from '../services/changeEngine';
-import { ingestLiveMarketData } from '../services/marketData';
+import { ingestLiveMarketData, pruneOldSnapshots } from '../services/marketData';
 import { getUserGoalImpacts } from '../services/goalEngine';
-import yahooFinanceModule from 'yahoo-finance2';
-
-const YF = (yahooFinanceModule as any).default || yahooFinanceModule;
-const yahooFinance = new YF();
+import { generateInsightForEvent } from '../services/insightEngine';
 
 const router = Router();
-const prisma = new PrismaClient();
 
-// ==============================
-// AUTH / USERS (Mock for MVP)
-// ==============================
+/** Express 5 types req.params values as string | string[]. This helper narrows to string. */
+const p = (val: string | string[]): string => (Array.isArray(val) ? val[0] : val);
 
-router.post('/auth/login', async (req, res) => {
-  const { email, name } = req.body;
-  let user = await prisma.user.findUnique({ where: { email } });
-  
-  if (!user) {
-    user = await prisma.user.create({ data: { email, name } });
+// ──────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** Safely fetch a Yahoo Finance quote with timeout + search fallback */
+async function resolveYahooQuote(rawSymbol: string, fallbackName?: string): Promise<any | null> {
+  const TIMEOUT = 7000;
+
+  const tryQuote = async (sym: string): Promise<any | null> => {
+    try {
+      const q = await Promise.race([
+        (yahooFinance as any).quote(sym),
+        new Promise<null>((_, r) => setTimeout(() => r(new Error('Timeout')), TIMEOUT)),
+      ]) as any;
+      return q?.regularMarketPrice ? q : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const trySearch = async (term: string): Promise<string | null> => {
+    try {
+      const res = await (yahooFinance as any).search(term);
+      return res?.quotes?.[0]?.symbol ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  // 1. Try direct NSE symbol
+  const direct = `${rawSymbol.toUpperCase().replace(/\s+/g, '')}.NS`;
+  let q = await tryQuote(direct);
+  if (q) return q;
+
+  // 2. Search fallback
+  const searchTerm = fallbackName || rawSymbol;
+  const foundSymbol = await trySearch(searchTerm);
+  if (foundSymbol) {
+    q = await tryQuote(foundSymbol);
+    if (q) return q;
   }
-  
+
+  return null;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// AUTH / USERS  (mock session — no real JWT for hackathon)
+// ──────────────────────────────────────────────────────────────────────────────
+
+router.post('/auth/login', async (req: Request, res: Response) => {
+  const { email, name } = req.body;
+
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ error: 'email is required' });
+  }
+
+  // Use upsert to avoid race condition between findUnique + create
+  const user = await prisma.user.upsert({
+    where: { email },
+    update: { name: name || undefined },
+    create: { email, name: name || 'User' },
+  });
+
   res.json({ user, token: 'mock-jwt-token' });
 });
 
-
-// ==============================
+// ──────────────────────────────────────────────────────────────────────────────
 // WATCHLISTS
-// ==============================
+// ──────────────────────────────────────────────────────────────────────────────
 
-// Create Watchlist
-router.post('/watchlists', async (req, res) => {
+router.post('/watchlists', async (req: Request, res: Response) => {
   const { userId, name } = req.body;
-  const watchlist = await prisma.watchlist.create({
-    data: { userId, name }
-  });
+  if (!userId || !name) {
+    return res.status(400).json({ error: 'userId and name are required' });
+  }
+  const watchlist = await prisma.watchlist.create({ data: { userId, name } });
   res.json(watchlist);
 });
 
-// Get User Watchlists
-router.get('/watchlists/user/:userId', async (req, res) => {
-  const { userId } = req.params;
+router.get('/watchlists/user/:userId', async (req: Request, res: Response) => {
+  const userId = p(req.params.userId);
   const watchlists = await prisma.watchlist.findMany({
     where: { userId },
-    include: {
-      stocks: { include: { stock: true } }
-    }
+    include: { stocks: { include: { stock: true } } },
   });
   res.json(watchlists);
 });
 
-// Get User Watchlist with LIVE data directly from Yahoo Finance
-router.get('/users/:userId/watchlist/live', async (req, res) => {
-  const { userId } = req.params;
+// ──────────────────────────────────────────────────────────────────────────────
+// LIVE WATCHLIST FEED
+// ──────────────────────────────────────────────────────────────────────────────
+
+router.get('/users/:userId/watchlist/live', async (req: Request, res: Response) => {
+  const userId = p(req.params.userId);
+  const marketStatus = getNSEMarketStatus();
+
   try {
     const watchlists = await prisma.watchlist.findMany({
       where: { userId },
-      include: {
-        stocks: { include: { stock: true } }
-      }
+      include: { stocks: { include: { stock: true } } },
     });
 
-    if (watchlists.length === 0) {
-      return res.json([]);
-    }
+    if (watchlists.length === 0) return res.json([]);
 
-    // Use the first watchlist
     const watchlist = watchlists[0];
-    const liveStocks = [];
 
-    for (const ws of watchlist.stocks) {
-      const stock = ws.stock;
-      let yahooSymbol = `${stock.symbol.toUpperCase().replace(/\s+/g, '')}.NS`;
-      let quote: any = null;
+    // Fetch all quotes in parallel
+    const liveStocks = await Promise.all(
+      watchlist.stocks.map(async (ws) => {
+        const stock = ws.stock;
+        const quote = await resolveYahooQuote(stock.symbol, stock.companyName);
 
-      console.log(`[LIVE] Fetching quote for ${yahooSymbol}...`);
-      try {
-        quote = await yahooFinance.quote(yahooSymbol) as any;
-      } catch (e) {
-        // Ignored, fallback will handle it
-      }
+        // Also get last snapshot for dataStatus context
+        const lastSnap = await prisma.marketSnapshot.findFirst({
+          where: { stockId: stock.id },
+          orderBy: { timestamp: 'desc' },
+        });
 
-      if (quote && quote.regularMarketPrice) {
-        console.log(`[LIVE] Found direct quote for ${yahooSymbol}`);
-      } else {
-        console.log(`[LIVE] Direct quote failed for ${yahooSymbol}, trying search fallback for "${stock.companyName || stock.symbol}"`);
-        try {
-          const searchRes = await yahooFinance.search(stock.companyName || stock.symbol);
-          if (searchRes.quotes.length > 0) {
-            yahooSymbol = searchRes.quotes[0].symbol;
-            console.log(`[LIVE] Search found symbol: ${yahooSymbol}`);
-            quote = await yahooFinance.quote(yahooSymbol) as any;
-            if (quote && quote.regularMarketPrice) {
-              console.log(`[LIVE] Search fallback quote succeeded for ${yahooSymbol}`);
-            }
-          } else {
-            console.log(`[LIVE] Search found no quotes for ${stock.companyName || stock.symbol}`);
-          }
-        } catch(err) {
-          console.error(`[LIVE] Search fallback error for ${stock.symbol}:`, err);
+        const dataStatus = lastSnap?.dataStatus ?? marketStatus.dataStatus;
+
+        if (quote) {
+          return {
+            id: stock.id,
+            symbol: stock.symbol,
+            companyName: stock.companyName,
+            sector: stock.sector,
+            price: quote.regularMarketPrice || 0,
+            dayChange: quote.regularMarketChange || 0,
+            dayChangePercent: quote.regularMarketChangePercent || 0,
+            volume: quote.regularMarketVolume || 0,
+            fiftyTwoWeekLow: quote.fiftyTwoWeekLow || 0,
+            fiftyTwoWeekHigh: quote.fiftyTwoWeekHigh || 0,
+            dataStatus,
+            marketStatus: marketStatus.reason,
+          };
         }
-      }
 
-      if (quote) {
-         liveStocks.push({
-           id: stock.id,
-           symbol: stock.symbol,
-           companyName: stock.companyName,
-           price: quote.regularMarketPrice || 0,
-           dayChange: quote.regularMarketChange || 0,
-           dayChangePercent: quote.regularMarketChangePercent || 0,
-           volume: quote.regularMarketVolume || 0,
-           fiftyTwoWeekLow: quote.fiftyTwoWeekLow || 0,
-           fiftyTwoWeekHigh: quote.fiftyTwoWeekHigh || 0,
-         });
-      } else {
-         console.log(`[LIVE] Fallback to 0s for ${stock.symbol} due to no quote`);
-         liveStocks.push({
-           id: stock.id,
-           symbol: stock.symbol,
-           companyName: stock.companyName,
-           price: 0, dayChange: 0, dayChangePercent: 0, volume: 0, fiftyTwoWeekLow: 0, fiftyTwoWeekHigh: 0
-         });
-      }
-    }
+        // Fallback to last snapshot price if live fetch fails
+        return {
+          id: stock.id,
+          symbol: stock.symbol,
+          companyName: stock.companyName,
+          sector: stock.sector,
+          price: lastSnap?.price || 0,
+          dayChange: 0,
+          dayChangePercent: 0,
+          volume: lastSnap?.volume || 0,
+          fiftyTwoWeekLow: 0,
+          fiftyTwoWeekHigh: 0,
+          dataStatus: 'STALE',
+          marketStatus: 'Data unavailable',
+        };
+      })
+    );
 
     res.json(liveStocks);
   } catch (error) {
-    console.error("Failed to fetch live watchlist:", error);
-    res.status(500).json({ error: "Failed to fetch live watchlist" });
+    console.error('[API] Failed to fetch live watchlist:', error);
+    res.status(500).json({ error: 'Failed to fetch live watchlist' });
   }
 });
 
-// Add Stock to Watchlist by Symbol
-router.post('/users/:userId/watchlist/stocks', async (req, res) => {
-  const { userId } = req.params;
+// ──────────────────────────────────────────────────────────────────────────────
+// ADD STOCK TO WATCHLIST
+// ──────────────────────────────────────────────────────────────────────────────
+
+router.post('/users/:userId/watchlist/stocks', async (req: Request, res: Response) => {
+  const userId = p(req.params.userId);
   const { symbol } = req.body;
 
+  if (!symbol || typeof symbol !== 'string') {
+    return res.status(400).json({ error: 'symbol is required' });
+  }
+
+  const cleanInput = symbol.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!cleanInput) {
+    return res.status(400).json({ error: 'Invalid symbol' });
+  }
+
   try {
-    // 1. Get or create user watchlist
+    // Get or create watchlist
     let watchlists = await prisma.watchlist.findMany({ where: { userId } });
     if (watchlists.length === 0) {
-      const newWl = await prisma.watchlist.create({ data: { userId, name: "My Watchlist" } });
-      watchlists = [newWl];
+      const wl = await prisma.watchlist.create({ data: { userId, name: 'My Watchlist' } });
+      watchlists = [wl];
     }
     const watchlistId = watchlists[0].id;
 
-    // 2. Fetch from Yahoo Finance to verify and get company name
-    let yahooSymbol = `${symbol.toUpperCase().replace(/\s+/g, '')}.NS`;
-    let quote: any = null;
-    
-    if (symbol.includes(' ')) {
-      const searchRes = await yahooFinance.search(symbol);
-      if (searchRes.quotes.length > 0) {
-        yahooSymbol = searchRes.quotes[0].symbol;
-      }
+    // Resolve quote
+    const quote = await resolveYahooQuote(cleanInput);
+    if (!quote) {
+      return res.status(404).json({ error: `Could not find a valid quote for "${cleanInput}"` });
     }
 
-    try {
-      quote = await yahooFinance.quote(yahooSymbol) as any;
-    } catch (e) {
-    }
+    const resolvedSymbol = quote.symbol?.replace('.NS', '') || cleanInput;
+    const marketStatus = getNSEMarketStatus();
 
-    if (!quote || !quote.regularMarketPrice) {
-      const searchRes = await yahooFinance.search(symbol);
-      if (searchRes.quotes.length > 0) {
-        yahooSymbol = searchRes.quotes[0].symbol;
-        quote = await yahooFinance.quote(yahooSymbol) as any;
-      }
-    }
-
-    if (!quote || !quote.regularMarketPrice) {
-      return res.status(404).json({ error: 'Quote not found' });
-    }
-
-    const cleanSymbol = quote.shortName || symbol.toUpperCase();
-
-    // 3. Upsert Stock in DB
+    // Upsert stock record
     const stock = await prisma.stock.upsert({
-      where: { symbol: cleanSymbol },
+      where: { symbol: resolvedSymbol },
       update: {},
       create: {
-        symbol: cleanSymbol,
-        companyName: quote.longName || cleanSymbol,
+        symbol: resolvedSymbol,
+        companyName: quote.longName || quote.shortName || resolvedSymbol,
         exchange: 'NSE',
-        sector: quote.sector || 'Unknown'
-      }
+        sector: quote.sector || 'Unknown',
+      },
     });
 
-    // 4. Add to WatchlistStock mapping (ignore if already added)
-    const existingEntry = await prisma.watchlistStock.findUnique({
-      where: { watchlistId_stockId: { watchlistId, stockId: stock.id } }
+    // Add to watchlist (idempotent)
+    const existing = await prisma.watchlistStock.findUnique({
+      where: { watchlistId_stockId: { watchlistId, stockId: stock.id } },
     });
-    
-    let added = existingEntry;
-    if (!existingEntry) {
-      added = await prisma.watchlistStock.create({
-        data: { watchlistId, stockId: stock.id }
-      });
+    if (!existing) {
+      await prisma.watchlistStock.create({ data: { watchlistId, stockId: stock.id } });
     }
 
-    // 5. Store current market price as initial snapshot
+    // Store initial snapshot
     const price = quote.regularMarketPrice;
     await prisma.marketSnapshot.create({
       data: {
@@ -210,129 +237,206 @@ router.post('/users/:userId/watchlist/stocks', async (req, res) => {
         price,
         volume: quote.regularMarketVolume || 0,
         source: 'YAHOO_FINANCE',
-        dataStatus: 'LIVE'
-      }
+        dataStatus: marketStatus.dataStatus,
+      },
     });
 
-    // 6. Update or Create the Last Seen State
+    // Set last-seen state to the current price (baseline)
     await prisma.userStockState.upsert({
       where: { userId_stockId: { userId, stockId: stock.id } },
       update: { lastSeenPrice: price, lastSeenTimestamp: new Date() },
-      create: { userId, stockId: stock.id, lastSeenPrice: price, lastSeenTimestamp: new Date() }
+      create: { userId, stockId: stock.id, lastSeenPrice: price, lastSeenTimestamp: new Date() },
     });
 
-    res.json({ success: true, stock, added });
+    res.json({ success: true, stock, alreadyExists: !!existing });
   } catch (error) {
-    console.error(`Failed to add stock ${symbol}:`, error);
-    res.status(500).json({ error: "Failed to add stock" });
+    console.error(`[API] Failed to add stock "${cleanInput}":`, error);
+    res.status(500).json({ error: 'Failed to add stock' });
   }
 });
 
-// ==============================
-// SMART WATCHLIST ENGINE
-// ==============================
+// ──────────────────────────────────────────────────────────────────────────────
+// DELETE STOCK FROM WATCHLIST
+// ──────────────────────────────────────────────────────────────────────────────
 
-// Trigger Market Movement (Live or Fallback)
-router.post('/debug/market-tick', async (req, res) => {
-  await ingestLiveMarketData();
-  res.json({ success: true, message: 'Market data updated.' });
+router.delete('/users/:userId/watchlist/stocks/:stockId', async (req: Request, res: Response) => {
+  const userId  = p(req.params.userId);
+  const stockId = p(req.params.stockId);
+
+  try {
+    // Find the user's watchlist
+    const watchlist = await prisma.watchlist.findFirst({ where: { userId } });
+    if (!watchlist) {
+      return res.status(404).json({ error: 'Watchlist not found' });
+    }
+
+    await prisma.watchlistStock.deleteMany({
+      where: { watchlistId: watchlist.id, stockId },
+    });
+
+    // Also clean up the last-seen state for this user-stock pair
+    await prisma.userStockState.deleteMany({
+      where: { userId, stockId },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error(`[API] Failed to delete stock ${stockId}:`, error);
+    res.status(500).json({ error: 'Failed to remove stock' });
+  }
 });
 
-// Create a Goal (or get existing if name matches)
-router.post('/users/:userId/goals', async (req, res) => {
-  const { userId } = req.params;
+// ──────────────────────────────────────────────────────────────────────────────
+// SMART WATCHLIST ENGINE — MEANINGFUL CHANGES DASHBOARD
+// ──────────────────────────────────────────────────────────────────────────────
+
+router.get('/users/:userId/dashboard/changes', async (req: Request, res: Response) => {
+  const userId = p(req.params.userId);
+
+  try {
+    const changes = await computeMeaningfulChange(userId);
+    const marketStatus = getNSEMarketStatus();
+
+    const attention    = changes.filter(c => c.severity === 'ATTENTION' || c.severity === 'SIGNIFICANT_CHANGE');
+    const worthKnowing = changes.filter(c => c.severity === 'WORTH_KNOWING');
+
+    // Get the total count of stocks in this user's watchlist (for accurate "normal" count)
+    const totalInWatchlist = await prisma.userStockState.count({ where: { userId } });
+
+    // ── Generate AI insights for attention-level changes ──────────────────────
+    const changesWithInsights = await Promise.all(
+      changes.map(async (change) => {
+        if (!change.changeEventId || change.severity === 'WORTH_KNOWING') {
+          return { ...change, insight: null };
+        }
+
+        // Fetch the full ChangeEvent record to pass to insight engine
+        const changeEvent = await prisma.changeEvent.findUnique({
+          where: { id: change.changeEventId },
+          include: { stock: true },
+        });
+
+        if (!changeEvent) return { ...change, insight: null };
+
+        try {
+          const insight = await generateInsightForEvent(changeEvent, {
+            percentageChange: change.percentageChange,
+            absoluteChange: change.absoluteChange,
+            lastSeenTimestamp: change.lastSeenTimestamp,
+            volume: change.latestSnapshot.volume,
+            score: change.score,
+          });
+          return { ...change, insight };
+        } catch {
+          return { ...change, insight: null };
+        }
+      })
+    );
+
+    // ── Update last-seen state atomically for all changed stocks ─────────────
+    if (changes.length > 0) {
+      await prisma.$transaction(
+        changes.map(change =>
+          prisma.userStockState.update({
+            where: { userId_stockId: { userId, stockId: change.stock.id } },
+            data: {
+              lastSeenPrice: change.latestSnapshot.price,
+              lastSeenTimestamp: new Date(),
+            },
+          })
+        )
+      );
+    }
+
+    // Separate attention vs worthKnowing from changesWithInsights
+    const attentionWithInsights    = changesWithInsights.filter(c => c.severity === 'ATTENTION' || c.severity === 'SIGNIFICANT_CHANGE');
+    const worthKnowingWithInsights = changesWithInsights.filter(c => c.severity === 'WORTH_KNOWING');
+
+    res.json({
+      marketStatus,
+      summary: {
+        totalChanges:    changes.length,
+        attentionCount:  attention.length,
+        worthKnowingCount: worthKnowing.length,
+        normalCount:     Math.max(0, totalInWatchlist - changes.length),
+        totalInWatchlist,
+      },
+      attention:    attentionWithInsights,
+      worthKnowing: worthKnowingWithInsights,
+    });
+  } catch (error) {
+    console.error('[API] Failed to compute dashboard changes:', error);
+    res.status(500).json({ error: 'Failed to compute changes' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GOALS
+// ──────────────────────────────────────────────────────────────────────────────
+
+router.post('/users/:userId/goals', async (req: Request, res: Response) => {
+  const userId = p(req.params.userId);
   const { name, horizonDays, targetAmount } = req.body;
-  
-  let goal = await prisma.goal.findFirst({
-    where: { userId, name }
+
+  if (!name || !horizonDays || !targetAmount) {
+    return res.status(400).json({ error: 'name, horizonDays and targetAmount are required' });
+  }
+
+  const goal = await prisma.goal.upsert({
+    where: { userId_name: { userId, name } } as any,
+    update: {},
+    create: { userId, name, horizonDays: Number(horizonDays), targetAmount: Number(targetAmount) },
   });
 
-  if (!goal) {
-    goal = await prisma.goal.create({
-      data: { userId, name, horizonDays, targetAmount }
-    });
-  }
-  
   res.json({ success: true, goal });
 });
 
-// Get Goal Impacts
-router.get('/users/:userId/goals/impact', async (req, res) => {
-  const { userId } = req.params;
+router.get('/users/:userId/goals/impact', async (req: Request, res: Response) => {
+  const userId = p(req.params.userId);
   const impacts = await getUserGoalImpacts(userId);
   res.json(impacts);
 });
 
-// Get Meaningful Changes for User Dashboard
-router.get('/users/:userId/dashboard/changes', async (req, res) => {
-  const { userId } = req.params;
-  const changes = await computeMeaningfulChange(userId);
-  
-  // Categorize changes
-  const attention = changes.filter(c => c.severity === 'ATTENTION' || c.severity === 'SIGNIFICANT_CHANGE');
-  const worthKnowing = changes.filter(c => c.severity === 'WORTH_KNOWING');
+// ──────────────────────────────────────────────────────────────────────────────
+// MARKET OPERATIONS
+// ──────────────────────────────────────────────────────────────────────────────
 
-  // Update user's last seen state since they are checking the dashboard now
-  for (const change of changes) {
-      await prisma.userStockState.update({
-          where: { userId_stockId: { userId: userId, stockId: change.stock.id } },
-          data: {
-              lastSeenPrice: change.latestSnapshot.price,
-              lastSeenTimestamp: new Date()
-          }
-      });
-  }
-
-  res.json({
-    summary: {
-      totalChanges: attention.length + worthKnowing.length,
-      attentionCount: attention.length,
-      worthKnowingCount: worthKnowing.length
-    },
-    attention,
-    worthKnowing,
-  });
+router.post('/debug/market-tick', async (req: Request, res: Response) => {
+  await ingestLiveMarketData();
+  res.json({ success: true, message: 'Market data updated.', marketStatus: getNSEMarketStatus() });
 });
 
-// Get Live Quote for a specific symbol on demand (for frontend additions)
-router.get('/stocks/:symbol/live', async (req, res) => {
-  const { symbol } = req.params;
+router.post('/debug/prune-snapshots', async (req: Request, res: Response) => {
+  await pruneOldSnapshots();
+  res.json({ success: true, message: 'Old snapshots pruned.' });
+});
+
+// Live quote for a single symbol (used by stock-search)
+router.get('/stocks/:symbol/live', async (req: Request, res: Response) => {
+  const symbol = p(req.params.symbol);
   try {
-    let yahooSymbol = `${symbol.toUpperCase().replace(/\s+/g, '')}.NS`; // Try NSE first
-
-    // If there are spaces, or as a fallback, we can use search
-    if (symbol.includes(' ')) {
-      const searchRes = await yahooFinance.search(symbol);
-      if (searchRes.quotes.length > 0) {
-        yahooSymbol = searchRes.quotes[0].symbol;
-      }
-    }
-
-    let quote = null;
-    try {
-      quote = await yahooFinance.quote(yahooSymbol) as any;
-    } catch (e) {
-      // If direct NSE fetch fails, do a search fallback
-      const searchRes = await yahooFinance.search(symbol);
-      if (searchRes.quotes.length > 0) {
-        yahooSymbol = searchRes.quotes[0].symbol;
-        quote = await yahooFinance.quote(yahooSymbol) as any;
-      }
-    }
-    
-    if (quote && quote.regularMarketPrice) {
+    const quote = await resolveYahooQuote(symbol);
+    if (quote) {
       res.json({
-        symbol: quote.shortName || symbol.toUpperCase(),
+        symbol: quote.symbol,
+        companyName: quote.longName || quote.shortName || symbol,
         price: quote.regularMarketPrice,
-        volume: quote.regularMarketVolume || 'Unknown'
+        volume: quote.regularMarketVolume || 0,
+        dayChange: quote.regularMarketChange || 0,
+        dayChangePercent: quote.regularMarketChangePercent || 0,
       });
     } else {
       res.status(404).json({ error: 'Quote not found' });
     }
   } catch (error) {
-    console.error(`Failed to fetch live quote for ${symbol}:`, error);
+    console.error(`[API] Live quote error for ${symbol}:`, error);
     res.status(500).json({ error: 'Failed to fetch live quote' });
   }
+});
+
+// Market status endpoint
+router.get('/market/status', (_req: Request, res: Response) => {
+  res.json(getNSEMarketStatus());
 });
 
 export default router;

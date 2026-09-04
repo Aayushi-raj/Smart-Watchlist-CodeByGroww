@@ -1,39 +1,33 @@
-import { PrismaClient, Goal, ChangeEvent } from '@prisma/client';
+import { Goal, ChangeEvent } from '@prisma/client';
+import prisma from '../db';
 
-const prisma = new PrismaClient();
-
-export async function calculateGoalImpact(goal: Goal, events: ChangeEvent[]) {
-  // Goal Horizons
-  // Short Term < 365 days
-  // Medium Term 1-5 years (365 - 1825 days)
-  // Long Term > 5 years (> 1825 days)
-  
-  const isShortTerm = goal.horizonDays < 365;
+export async function calculateGoalImpact(goal: Goal, events: (ChangeEvent & { stock: { companyName: string; symbol: string } })[]) {
+  const isShortTerm  = goal.horizonDays < 365;
   const isMediumTerm = goal.horizonDays >= 365 && goal.horizonDays <= 1825;
-  const isLongTerm = goal.horizonDays > 1825;
+  // isLongTerm = >1825 days (implicitly)
 
   let totalRiskScore = 0;
-  
+
   const impactAnalysis = events.map(event => {
     let impactText = '';
     let riskLevel = 'LOW';
 
-    if (event.severity === 'ATTENTION') {
+    if (event.severity === 'SIGNIFICANT_CHANGE' || event.severity === 'ATTENTION') {
       if (isShortTerm) {
-        impactText = 'High risk. Short-term goals are highly sensitive to current market volatility.';
+        impactText = `High risk. Short-term goals are highly sensitive to current volatility in ${event.stock.companyName}.`;
         riskLevel = 'HIGH';
-        totalRiskScore += 10;
+        totalRiskScore += event.severity === 'SIGNIFICANT_CHANGE' ? 15 : 10;
       } else if (isMediumTerm) {
-        impactText = 'Moderate risk. Keep an eye on it, but you have time to recover.';
+        impactText = `Moderate risk. Keep an eye on ${event.stock.companyName}, but you have time to recover.`;
         riskLevel = 'MEDIUM';
         totalRiskScore += 5;
       } else {
-        impactText = 'Low risk. Long-term goals can weather this short-term volatility. Potential buying opportunity.';
+        impactText = `Low risk. Long-term goals can weather this short-term volatility in ${event.stock.companyName}. Potential buying opportunity.`;
         riskLevel = 'LOW';
         totalRiskScore += 1;
       }
     } else if (event.severity === 'WORTH_KNOWING') {
-      impactText = 'Minor event. Does not significantly alter your trajectory.';
+      impactText = `Minor event in ${event.stock.companyName}. Does not significantly alter your trajectory.`;
       riskLevel = 'LOW';
       totalRiskScore += 2;
     } else {
@@ -44,48 +38,51 @@ export async function calculateGoalImpact(goal: Goal, events: ChangeEvent[]) {
     return {
       eventId: event.id,
       stockId: event.stockId,
+      stockSymbol: event.stock.symbol,
+      stockName: event.stock.companyName,
       impactText,
-      riskLevel
+      riskLevel,
     };
   });
 
-  // Calculate overall goal health based on risk score
   let goalHealth = 'ON_TRACK';
-  if (totalRiskScore > 15) {
-    goalHealth = 'AT_RISK';
-  } else if (totalRiskScore > 5) {
-    goalHealth = 'NEEDS_REVIEW';
-  }
+  if (totalRiskScore > 15)     goalHealth = 'AT_RISK';
+  else if (totalRiskScore > 5) goalHealth = 'NEEDS_REVIEW';
 
   return {
     goalId: goal.id,
     goalName: goal.name,
     horizonDays: goal.horizonDays,
+    targetAmount: goal.targetAmount,
     goalHealth,
-    impactAnalysis
+    impactAnalysis,
+    totalRiskScore,
   };
 }
 
 export async function getUserGoalImpacts(userId: string) {
   const goals = await prisma.goal.findMany({ where: { userId } });
-  
-  // Get recent change events for stocks in user's watchlists
+
+  if (goals.length === 0) return [];
+
+  // Fetch change events from the past 7 days for stocks in this user's watchlists
   const recentEvents = await prisma.changeEvent.findMany({
     where: {
       stock: {
         watchlists: {
-          some: {
-            watchlist: {
-              userId
-            }
-          }
-        }
+          some: { watchlist: { userId } },
+        },
       },
       detectedAt: {
-        gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // last 7 days
-      }
+        gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+      },
     },
-    include: { stock: true }
+    include: {
+      stock: {
+        select: { companyName: true, symbol: true },
+      },
+    },
+    orderBy: { detectedAt: 'desc' },
   });
 
   const impacts = await Promise.all(goals.map(goal => calculateGoalImpact(goal, recentEvents)));

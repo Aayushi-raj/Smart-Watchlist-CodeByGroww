@@ -27,6 +27,8 @@ model Goal {
   createdAt    DateTime @default(now())
 
   user         User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, name])
 }
 
 model Watchlist {

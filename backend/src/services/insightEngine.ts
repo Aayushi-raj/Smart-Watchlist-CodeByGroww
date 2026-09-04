@@ -1,23 +1,35 @@
-import { PrismaClient, ChangeEvent, Stock } from '@prisma/client';
+import { ChangeEvent, Stock } from '@prisma/client';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import prisma from '../db';
 
-const prisma = new PrismaClient();
-
-// Initialize Gemini (Will fail gracefully if no API key is provided)
 const apiKey = process.env.GEMINI_API_KEY || '';
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 
-export async function generateInsightForEvent(changeEvent: ChangeEvent & { stock: Stock }, contextData: any) {
-  // Check if insight is already cached
-  const existingInsight = await prisma.insight.findFirst({
-    where: { changeEventId: changeEvent.id }
-  });
+export interface InsightResult {
+  id: string;
+  changeEventId: string;
+  summary: string;
+  explanation: string;
+  modelVersion: string | null;
+  generatedAt: Date;
+}
 
-  if (existingInsight) {
-    return existingInsight;
+export async function generateInsightForEvent(
+  changeEvent: ChangeEvent & { stock: Stock },
+  contextData: {
+    percentageChange: number;
+    absoluteChange: number;
+    lastSeenTimestamp: Date;
+    volume: number;
+    score: number;
   }
+): Promise<InsightResult> {
+  // Return cached insight if already generated for this event
+  const existingInsight = await prisma.insight.findFirst({
+    where: { changeEventId: changeEvent.id },
+  });
+  if (existingInsight) return existingInsight;
 
-  // AI Fallback Mechanism: If AI is down or no key, generate deterministically
   if (!genAI) {
     return generateDeterministicFallback(changeEvent, contextData);
   }
@@ -25,77 +37,95 @@ export async function generateInsightForEvent(changeEvent: ChangeEvent & { stock
   try {
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
+    const hoursAway = Math.round(
+      (Date.now() - new Date(contextData.lastSeenTimestamp).getTime()) / (1000 * 60 * 60)
+    );
+    const direction = contextData.percentageChange >= 0 ? 'up' : 'down';
+
     const prompt = `
-    You are a financial analysis AI for a Smart Market Watchlist.
-    A user has returned to their watchlist, and the system detected a meaningful change.
-    
-    FACTS:
-    - Stock: ${changeEvent.stock.companyName} (${changeEvent.stock.symbol})
-    - Event Type: ${changeEvent.eventType}
-    - Severity: ${changeEvent.severity}
-    - Score: ${changeEvent.score} (0-100)
-    - Context: ${JSON.stringify(contextData)}
-    
-    Format your response EXACTLY like this:
-    
-    WHAT HAPPENED
-    [Explain what happened based on facts, e.g., "Reliance fell 4.8% since your last check."]
-    
-    WHY WE FLAGGED IT
-    [Explain based on the severity and score, e.g., "The move is significantly larger than its recent average..."]
-    
-    POSSIBLE CONTEXT
-    [Mention any context provided, e.g., "Quarterly results were released today."]
-    
-    WHAT TO WATCH
-    [One sentence on what to watch next]
-    
-    Do NOT give buy/sell advice. Do NOT predict the future. ONLY use the facts provided.
-    `;
+You are a financial analysis assistant for a Smart Market Watchlist.
+A user returned to their watchlist and the system detected a meaningful change.
+
+FACTS (use ONLY these — do not fabricate):
+- Stock: ${changeEvent.stock.companyName} (${changeEvent.stock.symbol})
+- Price moved: ${direction} ${Math.abs(contextData.percentageChange).toFixed(2)}% since the user last checked
+- Absolute change: ₹${Math.abs(contextData.absoluteChange).toFixed(2)}
+- User was away for approximately: ${hoursAway} hour(s)
+- Current trading volume: ${contextData.volume.toLocaleString()}
+- Anomaly severity: ${changeEvent.severity} (score: ${contextData.score}/100)
+- Event type: ${changeEvent.eventType}
+
+Format your response EXACTLY like this (use these exact section headers):
+
+WHAT HAPPENED
+[One sentence: what the price did, in plain language, anchored to when the user last checked.]
+
+WHY WE FLAGGED IT
+[One to two sentences: why the system classified this as ${changeEvent.severity}. Mention price movement and/or volume if relevant.]
+
+POSSIBLE CONTEXT
+[One sentence: what kind of market events typically cause this pattern. Be generic and factual — do NOT reference specific news.]
+
+WHAT TO WATCH NEXT
+[One sentence: what the user should monitor over the next few sessions.]
+
+RULES: Do NOT give buy or sell advice. Do NOT predict specific future prices. Only use the facts above.
+`.trim();
 
     const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+    const text = result.response.text();
 
-    // Store Insight (Caching)
     const newInsight = await prisma.insight.create({
       data: {
         changeEventId: changeEvent.id,
-        summary: \`\${changeEvent.stock.symbol} experienced a \${changeEvent.severity} event.\`,
+        summary: `${changeEvent.stock.symbol} — ${changeEvent.severity} (${Math.abs(contextData.percentageChange).toFixed(2)}% move)`,
         explanation: text,
-        modelVersion: 'gemini-1.5-flash'
-      }
+        modelVersion: 'gemini-1.5-flash',
+      },
     });
 
     return newInsight;
-
   } catch (error) {
-    console.error('AI Generation failed, falling back to deterministic insight.', error);
+    console.error('[InsightEngine] Gemini generation failed, using deterministic fallback.', error);
     return generateDeterministicFallback(changeEvent, contextData);
   }
 }
 
-async function generateDeterministicFallback(changeEvent: ChangeEvent & { stock: Stock }, contextData: any) {
-  const explanation = \`
+async function generateDeterministicFallback(
+  changeEvent: ChangeEvent & { stock: Stock },
+  contextData: {
+    percentageChange: number;
+    absoluteChange: number;
+    lastSeenTimestamp: Date;
+    volume: number;
+    score: number;
+  }
+): Promise<InsightResult> {
+  const direction = contextData.percentageChange >= 0 ? 'risen' : 'fallen';
+  const hoursAway = Math.round(
+    (Date.now() - new Date(contextData.lastSeenTimestamp).getTime()) / (1000 * 60 * 60)
+  );
+
+  const explanation = `
 WHAT HAPPENED
-\${changeEvent.stock.companyName} (\${changeEvent.stock.symbol}) experienced a \${changeEvent.eventType}.
+${changeEvent.stock.companyName} (${changeEvent.stock.symbol}) has ${direction} ${Math.abs(contextData.percentageChange).toFixed(2)}% (₹${Math.abs(contextData.absoluteChange).toFixed(2)}) since you last checked ${hoursAway} hour(s) ago.
 
 WHY WE FLAGGED IT
-The system detected an anomaly score of \${changeEvent.score}/100, marking it as \${changeEvent.severity}.
+The system assigned an anomaly score of ${contextData.score}/100 and classified this as ${changeEvent.severity}. ${contextData.volume > 1_000_000 ? `Trading volume of ${(contextData.volume / 1_000_000).toFixed(1)}M is notably elevated.` : `Price movement of ${Math.abs(contextData.percentageChange).toFixed(2)}% exceeds the normal threshold for this stock.`}
 
 POSSIBLE CONTEXT
-\${contextData.mockEvent || 'Market data suggests unusual activity.'}
+Moves of this magnitude are typically associated with earnings releases, sector-wide news, or broader market volatility.
 
-WHAT TO WATCH
-Monitor market reaction over the next few trading sessions. (AI Explanation temporarily unavailable).
-\`;
+WHAT TO WATCH NEXT
+Monitor ${changeEvent.stock.symbol} for follow-through volume and any official company announcements in the next few trading sessions.
+`.trim();
 
   return await prisma.insight.create({
     data: {
       changeEventId: changeEvent.id,
-      summary: \`Deterministic Fallback: \${changeEvent.stock.symbol}\`,
-      explanation: explanation,
-      modelVersion: 'fallback-deterministic-v1'
-    }
+      summary: `${changeEvent.stock.symbol} — ${changeEvent.severity} (fallback insight)`,
+      explanation,
+      modelVersion: 'deterministic-fallback-v2',
+    },
   });
 }
