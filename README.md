@@ -132,6 +132,15 @@ npm install
 npm run dev
 ```
 
+### OUTPUT
+<img width="1260" height="589" alt="image" src="https://github.com/user-attachments/assets/036e220b-8c98-4b18-8bdc-c5dd7c885be6" />
+<img width="1231" height="576" alt="image" src="https://github.com/user-attachments/assets/42cdc0e2-b6bb-4440-ba86-f0d9bf3bdd8f" />
+<img width="1227" height="589" alt="image" src="https://github.com/user-attachments/assets/2e5fba93-aa51-4294-89db-0d87e312c600" />
+<img width="1301" height="597" alt="image" src="https://github.com/user-attachments/assets/08dc9a8b-f3c6-4816-9ef8-5e9b37739884" />
+
+
+
+
 
 ---
 *Built with ❤️ for Groww CODE 2026*
