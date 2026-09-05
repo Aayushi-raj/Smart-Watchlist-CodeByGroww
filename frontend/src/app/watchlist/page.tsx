@@ -726,13 +726,13 @@ export default function WatchlistPage() {
                         placeholder="e.g. RELIANCE, TCS"
                         value={addSymbolInput}
                         onChange={e => handleAddSymbolChange(e.target.value.toUpperCase())}
-                        onKeyDown={e => { if (e.key === 'Enter' && livePreview) handleAddStock(); }}
+                        onKeyDown={e => { if (e.key === 'Enter' && addSymbolInput.trim()) handleAddStock(); }}
                         className="flex-1 border border-gray-200 rounded-md px-3 py-1.5 text-sm outline-none focus:border-[#00d09c] transition-colors"
                         autoFocus
                       />
                       <button
                         onClick={handleAddStock}
-                        disabled={addingInProgress || !addSymbolInput.trim() || !livePreview}
+                        disabled={addingInProgress || !addSymbolInput.trim()}
                         className="px-3 py-1.5 bg-[#00d09c] text-white text-sm font-medium rounded-md hover:bg-[#00b386] transition-colors disabled:opacity-50"
                       >
                         {addingInProgress ? '…' : 'Add'}
