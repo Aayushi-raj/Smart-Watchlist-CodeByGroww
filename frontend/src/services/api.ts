@@ -140,23 +140,71 @@ export interface LiveQuotePreview {
 }
 
 
-// ── Session Management ───────────────────────────────────────────────────────
+export interface UserProfile {
+  id: string;
+  email: string;
+  name: string;
+}
 
-let _userId: string | null = null;
+let _cachedUser: UserProfile | null = null;
 
-export async function getDemoUser(): Promise<string> {
-  if (_userId) return _userId;
+export function getCurrentUser(): UserProfile | null {
+  if (typeof window === 'undefined') return null;
+  if (_cachedUser) return _cachedUser;
+  try {
+    const raw = localStorage.getItem('groww_user_session');
+    if (raw) {
+      _cachedUser = JSON.parse(raw);
+      return _cachedUser;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
 
+export async function loginUser(email: string, name?: string): Promise<UserProfile> {
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'demo@groww.in', name: 'Demo User' }),
+    body: JSON.stringify({ email, name }),
   });
 
-  if (!res.ok) throw new Error(`Login failed: ${res.status}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Login failed: ${errText}`);
+  }
+
   const data = await res.json();
-  _userId = data.user.id;
-  return _userId!;
+  const user: UserProfile = {
+    id: data.user.id,
+    email: data.user.email,
+    name: data.user.name || email.split('@')[0],
+  };
+
+  _cachedUser = user;
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('groww_user_session', JSON.stringify(user));
+    window.dispatchEvent(new CustomEvent('groww_user_changed', { detail: user }));
+  }
+
+  return user;
+}
+
+export function logoutUser(): void {
+  _cachedUser = null;
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('groww_user_session');
+    window.dispatchEvent(new CustomEvent('groww_user_changed', { detail: null }));
+  }
+}
+
+export async function getDemoUser(): Promise<string> {
+  const current = getCurrentUser();
+  if (current) return current.id;
+
+  const user = await loginUser('demo@groww.in', 'Demo User');
+  return user.id;
 }
 
 // ── API Calls ────────────────────────────────────────────────────────────────

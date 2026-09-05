@@ -85,12 +85,65 @@ router.post('/auth/login', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'email is required' });
   }
 
+  const cleanEmail = email.trim().toLowerCase();
+
   // Use upsert to avoid race condition between findUnique + create
   const user = await prisma.user.upsert({
-    where: { email },
+    where: { email: cleanEmail },
     update: { name: name || undefined },
-    create: { email, name: name || 'User' },
+    create: { email: cleanEmail, name: name || cleanEmail.split('@')[0] },
   });
+
+  // Ensure default watchlist exists for user
+  let watchlist = await prisma.watchlist.findFirst({ where: { userId: user.id } });
+  if (!watchlist) {
+    watchlist = await prisma.watchlist.create({
+      data: { userId: user.id, name: 'My Watchlist' },
+    });
+
+    // Seed initial default stocks for new user
+    const defaultSymbols = ['RELIANCE', 'TCS', 'INFY'];
+    for (const sym of defaultSymbols) {
+      try {
+        const quote = await resolveYahooQuote(sym);
+        if (quote) {
+          const resolvedSymbol = quote.symbol?.replace('.NS', '') || sym;
+          const stock = await prisma.stock.upsert({
+            where: { symbol: resolvedSymbol },
+            update: {},
+            create: {
+              symbol: resolvedSymbol,
+              companyName: quote.longName || quote.shortName || resolvedSymbol,
+              exchange: 'NSE',
+              sector: quote.sector || 'IT',
+            },
+          });
+          await prisma.watchlistStock.create({
+            data: { watchlistId: watchlist.id, stockId: stock.id },
+          }).catch(() => {});
+
+          const price = quote.regularMarketPrice || 1000;
+          await prisma.marketSnapshot.create({
+            data: {
+              stockId: stock.id,
+              price,
+              volume: quote.regularMarketVolume || 10000,
+              source: 'YAHOO_FINANCE',
+              dataStatus: 'LIVE',
+            },
+          }).catch(() => {});
+
+          await prisma.userStockState.upsert({
+            where: { userId_stockId: { userId: user.id, stockId: stock.id } },
+            update: { lastSeenPrice: price, lastSeenTimestamp: new Date() },
+            create: { userId: user.id, stockId: stock.id, lastSeenPrice: price, lastSeenTimestamp: new Date() },
+          }).catch(() => {});
+        }
+      } catch {
+        /* skip failed seed item */
+      }
+    }
+  }
 
   res.json({ user, token: 'mock-jwt-token' });
 });

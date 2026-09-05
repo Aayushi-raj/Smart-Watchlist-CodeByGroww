@@ -17,6 +17,8 @@ import {
   getChangeHistory,
   getSectorContext,
   getLiveQuotePreview,
+  getCurrentUser,
+  UserProfile,
   DashboardChanges,
   LiveStock,
   StockChange,
@@ -329,15 +331,7 @@ export default function WatchlistPage() {
   const [isRefreshing, setIsRefreshing]     = useState(false);
   const [lastLoadedAt, setLastLoadedAt]     = useState<Date | null>(null);
   const [loadError, setLoadError]           = useState('');
-
-  // earliest lastSeenTimestamp across all changes — represents "when user last checked"
-  const lastSeenTimestamp: string | null =
-    dashboard && [...dashboard.attention, ...dashboard.worthKnowing].length > 0
-      ? [...dashboard.attention, ...dashboard.worthKnowing].reduce((earliest, c) =>
-          c.lastSeenTimestamp < earliest ? c.lastSeenTimestamp : earliest,
-          dashboard.attention[0]?.lastSeenTimestamp ?? dashboard.worthKnowing[0]?.lastSeenTimestamp
-        )
-      : null;
+  const [currentUser, setCurrentUser]       = useState<UserProfile | null>(null);
 
   const loadAll = useCallback(async (showRefreshSpin = false) => {
     if (showRefreshSpin) setIsRefreshing(true);
@@ -372,13 +366,32 @@ export default function WatchlistPage() {
       }
     } catch (err: any) {
       console.error('Failed to load dashboard:', err);
-      setLoadError('Could not connect to server. Make sure the backend is running on port 5000.');
+      setLoadError('Could not connect to server. Make sure the backend is running.');
     } finally {
       setIsRefreshing(false);
     }
   }, [sensitivity, hasShownDigest]);
 
-  useEffect(() => { loadAll(); }, [loadAll]);
+  useEffect(() => {
+    setCurrentUser(getCurrentUser());
+    loadAll();
+
+    const handleUserChange = (e: CustomEvent<UserProfile | null>) => {
+      setCurrentUser(e.detail);
+      loadAll();
+    };
+    window.addEventListener('groww_user_changed', handleUserChange as EventListener);
+    return () => window.removeEventListener('groww_user_changed', handleUserChange as EventListener);
+  }, [loadAll]);
+
+  // earliest lastSeenTimestamp across all changes — represents "when user last checked"
+  const lastSeenTimestamp: string | null =
+    dashboard && [...dashboard.attention, ...dashboard.worthKnowing].length > 0
+      ? [...dashboard.attention, ...dashboard.worthKnowing].reduce((earliest, c) =>
+          c.lastSeenTimestamp < earliest ? c.lastSeenTimestamp : earliest,
+          dashboard.attention[0]?.lastSeenTimestamp ?? dashboard.worthKnowing[0]?.lastSeenTimestamp
+        )
+      : null;
 
   // Load Sector Context & History when stock is selected
   useEffect(() => {
@@ -520,7 +533,7 @@ export default function WatchlistPage() {
           <div className="flex items-start justify-between">
             <div>
               <h1 className="text-[28px] font-bold text-[#44475b] tracking-tight">
-                Good {new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'} 👋
+                Good {new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}{currentUser?.name ? `, ${currentUser.name.split(' ')[0]}` : ''} 👋
               </h1>
               {allChanges.length > 0 && lastSeenTimestamp ? (
                 <p className="text-[18px] text-[#44475b] font-medium mt-1">
