@@ -1,6 +1,6 @@
-# WatchWise - Smart Market Watchlist - Groww CODE 2026
+# WatchWise - Intelligent Market Watchlist
 
-![Smart Market Watchlist](https://img.shields.io/badge/Groww-CODE_2026-00d09c?style=for-the-badge)
+![Intelligent Market Watchlist](https://img.shields.io/badge/Groww-CODE_2026-00d09c?style=for-the-badge)
 [![Vercel Deployment](https://img.shields.io/badge/Vercel-Live_Demo-000000?style=for-the-badge&logo=vercel&logoColor=white)](https://watchwise-smart-watchlist.vercel.app/)
 
 A smart watchlist feature enhancement designed for Groww users to instantly understand what has "meaningfully changed" since they last checked, focusing attention on what truly matters.
